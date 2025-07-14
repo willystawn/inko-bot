@@ -1,0 +1,22 @@
+[
+  {
+    "constant": false,
+    "inputs": [
+      { "name": "tokenID_", "type": "uint256" }
+    ],
+    "name": "wrap",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "constant": false,
+    "inputs": [
+      { "name": "tokenID_", "type": "uint256" }
+    ],
+    "name": "unwrap",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  }
+]
