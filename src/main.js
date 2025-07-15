@@ -39,6 +39,11 @@ const RPC_URLS = ["https://sepolia.base.org", "https://base-sepolia.drpc.org", "
 let currentRpcIndex = 0;
 const MAX_RETRIES = 5; // Max retries for a single transaction after hitting rate limits
 
+// ===> FIX: ADDED THE MISSING CONTRACT ADDRESSES BACK <===
+const MINT_CONTRACT_ADDRESS = "0xAF33ADd7918F685B2A82C1077bd8c07d220FFA04";
+const WRAPPER_CONTRACT_ADDRESS = "0xA449bc031fA0b815cA14fAFD0c5EdB75ccD9c80f";
+// =========================================================
+
 let provider, wallet, mintContract, wrapperContract;
 
 function initializeConnections() {
@@ -85,8 +90,6 @@ async function executeTransaction(fn, actionName) {
                 currentRpcIndex = (currentRpcIndex + 1) % RPC_URLS.length;
                 initializeConnections();
                 await sleep(2000); // Short delay after switching RPC
-                // We don't increment attempt here, we just try the new RPC
-                // To avoid infinite loops, let's just retry a fixed number of times total
                 continue;
             } else {
                 console.error(`[ERROR] A fatal non-network, non-rate-limit error occurred during ${actionName}: ${error.reason || error.message}`);
@@ -94,7 +97,7 @@ async function executeTransaction(fn, actionName) {
             }
         }
     }
-    return false; // Should only be reached if all retries fail
+    return false;
 }
 
 // --- The rest of the script remains the same ---
