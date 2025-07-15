@@ -37,9 +37,7 @@ if (!PRIVATE_KEY) {
 
 const RPC_URLS = ["https://sepolia.base.org", "https://base-sepolia.drpc.org", "https://base-sepolia.therpc.io"];
 let currentRpcIndex = 0;
-
-const MINT_CONTRACT_ADDRESS = "0xAF33ADd7918F685B2A82C1077bd8c07d220FFA04";
-const WRAPPER_CONTRACT_ADDRESS = "0xA449bc031fA0b815cA14fAFD0c5EdB75ccD9c80f";
+const MAX_RETRIES = 5; // Max retries for a single transaction after hitting rate limits
 
 let provider, wallet, mintContract, wrapperContract;
 
@@ -55,10 +53,10 @@ function initializeConnections() {
     console.log(`[SETUP] Connection successful. Wallet: ${wallet.address}`);
 }
 
-// --- CORE TRANSACTION & WORKER FUNCTIONS ---
+// --- CORE TRANSACTION (ENHANCED WITH RETRY LOGIC) ---
 
 async function executeTransaction(fn, actionName) {
-    for (let i = 0; i < RPC_URLS.length; i++) {
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
             const feeData = await provider.getFeeData();
             const gasPrice = feeData.gasPrice + BigInt(randomDelay(1, 100));
@@ -68,50 +66,57 @@ async function executeTransaction(fn, actionName) {
             console.log(`[SUCCESS] ${actionName} confirmed in block: ${receipt.blockNumber}`);
             return true;
         } catch (error) {
-            const isNetworkError = ['SERVER_ERROR', 'NETWORK_ERROR', 'TIMEOUT'].includes(error.code) || (error.message && (error.message.includes('failed to detect network') || error.message.includes('500')));
-            if (isNetworkError) {
-                console.warn(`[WARN] Network issue on RPC ${RPC_URLS[currentRpcIndex]}. Trying next...`);
-                if (i < RPC_URLS.length - 1) {
-                    currentRpcIndex = (currentRpcIndex + 1) % RPC_URLS.length;
-                    initializeConnections();
-                    await sleep(2000);
-                    continue;
+            const isRateLimitError = (error.code === -32029) || (error.message && error.message.toLowerCase().includes('rate limit exceeded'));
+            const isNetworkError = ['SERVER_ERROR', 'NETWORK_ERROR', 'TIMEOUT'].includes(error.code) || (error.message && error.message.includes('failed to detect network'));
+            
+            if (isRateLimitError) {
+                console.warn(`[WARN] Rate limit exceeded on attempt ${attempt}/${MAX_RETRIES}.`);
+                if (attempt < MAX_RETRIES) {
+                    const backoffTime = randomDelay(60000, 120000); // Wait 1-2 minutes
+                    console.log(`[INFO] Waiting for ${backoffTime / 1000}s before retrying...`);
+                    await sleep(backoffTime);
+                    continue; // Retry the same transaction after delay
                 } else {
-                    console.error("[CRITICAL] All RPCs failed for this action.");
+                    console.error(`[CRITICAL] Failed after ${MAX_RETRIES} rate-limit retries. Aborting action.`);
                     return false;
                 }
+            } else if (isNetworkError) {
+                console.warn(`[WARN] Network issue on RPC ${RPC_URLS[currentRpcIndex]}. Switching RPC...`);
+                currentRpcIndex = (currentRpcIndex + 1) % RPC_URLS.length;
+                initializeConnections();
+                await sleep(2000); // Short delay after switching RPC
+                // We don't increment attempt here, we just try the new RPC
+                // To avoid infinite loops, let's just retry a fixed number of times total
+                continue;
             } else {
-                console.error(`[ERROR] A non-network error occurred during ${actionName}: ${error.reason || error.message}`);
-                return false;
+                console.error(`[ERROR] A fatal non-network, non-rate-limit error occurred during ${actionName}: ${error.reason || error.message}`);
+                return false; // Fatal error, no point in retrying
             }
         }
     }
-    return false;
+    return false; // Should only be reached if all retries fail
 }
 
-// --- MAIN DAILY WORKFLOW ---
+// --- The rest of the script remains the same ---
 
 async function runDailyCycle() {
     console.log("\n========================================================");
     console.log(`[WORKFLOW] Starting new daily cycle at ${new Date().toUTCString()}`);
     console.log("========================================================");
 
-    // 1. Determine daily goal
-    const dailyPairGoal = randomDelay(25, 50); // 25 to 50 wrap/unwrap pairs
+    const dailyPairGoal = randomDelay(25, 50);
     const dailyTxGoal = dailyPairGoal * 2;
     console.log(`[GOAL] Today's target is ${dailyTxGoal} transactions (${dailyPairGoal} wrap/unwrap pairs).`);
     
-    // 2. Preparation Phase
     console.log("\n--- Phase 1: Preparation ---");
     const mintSuccess = await executeTransaction((overrides) => mintContract.mint(wallet.address, ethers.parseUnits("100", 18), overrides), "Daily Mint");
     const approveSuccess = await executeTransaction((overrides) => mintContract.approve(WRAPPER_CONTRACT_ADDRESS, ethers.MaxUint256, overrides), "Daily Approve");
     
     if (!mintSuccess || !approveSuccess) {
         console.error("[CRITICAL] Preparation phase failed. Skipping transactions for today.");
-        return; // Exit this cycle and wait for the next day
+        return;
     }
 
-    // 3. Execution Phase
     console.log("\n--- Phase 2: Transaction Execution ---");
     let txCounter = 0;
     for (let i = 1; i <= dailyPairGoal; i++) {
@@ -123,34 +128,25 @@ async function runDailyCycle() {
 
         if (wrapSuccess) {
             await sleep(randomDelay(30000, 60000));
-            
             const unwrapSuccess = await executeTransaction((overrides) => wrapperContract.unwrap(randomID, overrides), `Unwrap #${i}`);
             if(unwrapSuccess) txCounter++;
         }
         
-        // Short delay between pairs
         if(i < dailyPairGoal) {
             await sleep(randomDelay(10000, 20000));
         }
     }
-
     console.log(`\n[WORKFLOW] Execution phase complete. Total transactions today: ${txCounter}`);
 }
 
-
-// --- MAIN EXECUTION LOOP ---
 async function main() {
     initializeConnections();
-    
     while (true) {
         const startTime = Date.now();
-        
         await runDailyCycle();
-
         const endTime = Date.now();
         const cycleDuration = endTime - startTime;
         const oneDayInMs = 24 * 60 * 60 * 1000;
-        
         const sleepTime = Math.max(0, oneDayInMs - cycleDuration);
         
         console.log("\n========================================================");
@@ -159,7 +155,6 @@ async function main() {
         console.log(`[INFO] Sleeping for ${(sleepTime / 1000 / 60 / 60).toFixed(2)} hours.`);
         console.log(`[INFO] Next cycle will start around ${new Date(Date.now() + sleepTime).toUTCString()}`);
         console.log("========================================================\n");
-        
         await sleep(sleepTime);
     }
 }
