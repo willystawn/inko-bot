@@ -37,13 +37,12 @@ if (!PRIVATE_KEY) {
 
 const RPC_URLS = ["https://sepolia.base.org", "https://base-sepolia.drpc.org", "https://base-sepolia.therpc.io"];
 let currentRpcIndex = 0;
-const MAX_RETRIES = 5; // Max retries for a single transaction after hitting rate limits
+const MAX_RETRIES = 5;
 
-// ===> FIX: ADDED THE MISSING CONTRACT ADDRESSES BACK <===
 const MINT_CONTRACT_ADDRESS = "0xAF33ADd7918F685B2A82C1077bd8c07d220FFA04";
 const WRAPPER_CONTRACT_ADDRESS = "0xA449bc031fA0b815cA14fAFD0c5EdB75ccD9c80f";
-// =========================================================
 
+// --- GLOBAL VARIABLES ---
 let provider, wallet, mintContract, wrapperContract;
 
 function initializeConnections() {
@@ -59,12 +58,12 @@ function initializeConnections() {
 }
 
 // --- CORE TRANSACTION (ENHANCED WITH RETRY LOGIC) ---
-
 async function executeTransaction(fn, actionName) {
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
             const feeData = await provider.getFeeData();
-            const gasPrice = feeData.gasPrice + BigInt(randomDelay(1, 100));
+            // Add a small random value to the gas price to improve tx priority
+            const gasPrice = feeData.gasPrice + BigInt(randomDelay(1, 100)); 
             const tx = await fn({ gasPrice });
             console.log(`[INFO] ${actionName} transaction sent. Hash: ${tx.hash}`);
             const receipt = await tx.wait();
@@ -80,7 +79,7 @@ async function executeTransaction(fn, actionName) {
                     const backoffTime = randomDelay(60000, 120000); // Wait 1-2 minutes
                     console.log(`[INFO] Waiting for ${backoffTime / 1000}s before retrying...`);
                     await sleep(backoffTime);
-                    continue; // Retry the same transaction after delay
+                    continue;
                 } else {
                     console.error(`[CRITICAL] Failed after ${MAX_RETRIES} rate-limit retries. Aborting action.`);
                     return false;
@@ -89,76 +88,126 @@ async function executeTransaction(fn, actionName) {
                 console.warn(`[WARN] Network issue on RPC ${RPC_URLS[currentRpcIndex]}. Switching RPC...`);
                 currentRpcIndex = (currentRpcIndex + 1) % RPC_URLS.length;
                 initializeConnections();
-                await sleep(2000); // Short delay after switching RPC
+                await sleep(2000);
                 continue;
             } else {
-                console.error(`[ERROR] A fatal non-network, non-rate-limit error occurred during ${actionName}: ${error.reason || error.message}`);
-                return false; // Fatal error, no point in retrying
+                console.error(`[ERROR] A fatal error occurred during ${actionName}: ${error.reason || error.message}`);
+                return false;
             }
         }
     }
     return false;
 }
 
-// --- The rest of the script remains the same ---
+// --- NEW HELPER FUNCTIONS ---
 
-async function runDailyCycle() {
-    console.log("\n========================================================");
-    console.log(`[WORKFLOW] Starting new daily cycle at ${new Date().toUTCString()}`);
-    console.log("========================================================");
+const MINT_AMOUNT = ethers.parseUnits("100", 18); // Amount to mint when balance is empty
+const SUFFICIENT_ALLOWANCE = ethers.parseUnits("1000000", 18); // A large number for checking allowance
 
-    const dailyPairGoal = randomDelay(25, 50);
-    const dailyTxGoal = dailyPairGoal * 2;
-    console.log(`[GOAL] Today's target is ${dailyTxGoal} transactions (${dailyPairGoal} wrap/unwrap pairs).`);
-    
-    console.log("\n--- Phase 1: Preparation ---");
-    const mintSuccess = await executeTransaction((overrides) => mintContract.mint(wallet.address, ethers.parseUnits("100", 18), overrides), "Daily Mint");
-    const approveSuccess = await executeTransaction((overrides) => mintContract.approve(WRAPPER_CONTRACT_ADDRESS, ethers.MaxUint256, overrides), "Daily Approve");
-    
-    if (!mintSuccess || !approveSuccess) {
-        console.error("[CRITICAL] Preparation phase failed. Skipping transactions for today.");
-        return;
-    }
-
-    console.log("\n--- Phase 2: Transaction Execution ---");
-    let txCounter = 0;
-    for (let i = 1; i <= dailyPairGoal; i++) {
-        console.log(`\n----- Executing Pair ${i} of ${dailyPairGoal} -----`);
-        const randomID = getRandomTokenID();
-
-        const wrapSuccess = await executeTransaction((overrides) => wrapperContract.wrap(randomID, overrides), `Wrap #${i}`);
-        if(wrapSuccess) txCounter++;
-
-        if (wrapSuccess) {
-            await sleep(randomDelay(30000, 60000));
-            const unwrapSuccess = await executeTransaction((overrides) => wrapperContract.unwrap(randomID, overrides), `Unwrap #${i}`);
-            if(unwrapSuccess) txCounter++;
-        }
+async function checkAndMintIfNeeded() {
+    console.log("[CHECK] Checking token balance...");
+    try {
+        const balance = await mintContract.balanceOf(wallet.address);
+        console.log(`[INFO] Current balance: ${ethers.formatUnits(balance, 18)} tokens.`);
         
-        if(i < dailyPairGoal) {
-            await sleep(randomDelay(10000, 20000));
+        if (balance === 0n) { // Check if balance is exactly zero
+            console.log("[ACTION] Balance is empty. Minting new tokens...");
+            return await executeTransaction(
+                (overrides) => mintContract.mint(wallet.address, MINT_AMOUNT, overrides),
+                "Mint"
+            );
+        } else {
+            console.log("[INFO] Sufficient balance, no minting needed.");
+            return true;
         }
+    } catch (error) {
+        console.error(`[ERROR] Failed to check token balance: ${error.message}`);
+        return false;
     }
-    console.log(`\n[WORKFLOW] Execution phase complete. Total transactions today: ${txCounter}`);
 }
+
+async function checkAndApproveIfNeeded() {
+    console.log("[CHECK] Checking token allowance for the wrapper contract...");
+    try {
+        const allowance = await mintContract.allowance(wallet.address, WRAPPER_CONTRACT_ADDRESS);
+        console.log(`[INFO] Current allowance: ${ethers.formatUnits(allowance, 18)} tokens.`);
+
+        if (allowance < SUFFICIENT_ALLOWANCE) {
+            console.log("[ACTION] Allowance is low. Setting approval to maximum...");
+            return await executeTransaction(
+                (overrides) => mintContract.approve(WRAPPER_CONTRACT_ADDRESS, ethers.MaxUint256, overrides),
+                "Approve"
+            );
+        } else {
+            console.log("[INFO] Sufficient allowance, no approval needed.");
+            return true;
+        }
+    } catch (error) {
+        console.error(`[ERROR] Failed to check or set token allowance: ${error.message}`);
+        return false;
+    }
+}
+
+// --- MAIN WORKFLOW ---
 
 async function main() {
     initializeConnections();
+
+    console.log("\n--- Initial Setup ---");
+    const setupSuccess = await checkAndApproveIfNeeded();
+    if (!setupSuccess) {
+        console.error("[FATAL] Initial approval failed. Please check RPC and wallet. Exiting in 1 minute.");
+        await sleep(60000);
+        process.exit(1);
+    }
+    console.log("--- Setup Complete ---\n");
+
+    let successfulPairs = 0;
     while (true) {
-        const startTime = Date.now();
-        await runDailyCycle();
-        const endTime = Date.now();
-        const cycleDuration = endTime - startTime;
-        const oneDayInMs = 24 * 60 * 60 * 1000;
-        const sleepTime = Math.max(0, oneDayInMs - cycleDuration);
+        console.log("========================================================");
+        console.log(`[WORKFLOW] Starting transaction pair #${successfulPairs + 1} at ${new Date().toUTCString()}`);
+        console.log("========================================================");
+
+        const readyToWrap = await checkAndMintIfNeeded();
+        if (!readyToWrap) {
+            console.warn("[WARN] Minting check or action failed. Retrying after 2 minutes.");
+            await sleep(120000);
+            continue; // Skip to the next iteration
+        }
+
+        const randomID = getRandomTokenID();
+        console.log(`\n----- Executing pair for Token ID: ${randomID} -----`);
         
-        console.log("\n========================================================");
-        console.log(`[WORKFLOW] Daily cycle has concluded.`);
-        console.log(`[INFO] Cycle duration: ${(cycleDuration / 1000 / 60).toFixed(2)} minutes.`);
-        console.log(`[INFO] Sleeping for ${(sleepTime / 1000 / 60 / 60).toFixed(2)} hours.`);
-        console.log(`[INFO] Next cycle will start around ${new Date(Date.now() + sleepTime).toUTCString()}`);
-        console.log("========================================================\n");
-        await sleep(sleepTime);
+        const wrapSuccess = await executeTransaction(
+            (overrides) => wrapperContract.wrap(randomID, overrides), 
+            `Wrap #${successfulPairs + 1}`
+        );
+        
+        if (wrapSuccess) {
+            const interTxDelay = randomDelay(10000, 30000); // 10-30s delay between wrap & unwrap
+            console.log(`[INFO] Wrap successful. Waiting ${interTxDelay / 1000}s before unwrapping.`);
+            await sleep(interTxDelay);
+
+            const unwrapSuccess = await executeTransaction(
+                (overrides) => wrapperContract.unwrap(randomID, overrides), 
+                `Unwrap #${successfulPairs + 1}`
+            );
+
+            if (unwrapSuccess) {
+                successfulPairs++;
+                console.log(`\n[SUCCESS] Completed transaction pair #${successfulPairs}.`);
+
+                const mainDelay = randomDelay(300 * 1000, 600 * 1000); // 5 to 10 minutes
+                console.log(`[INFO] Waiting for ${(mainDelay / 1000 / 60).toFixed(2)} minutes until the next pair.`);
+                await sleep(mainDelay);
+            } else {
+                console.error("[ERROR] Unwrap transaction failed. Waiting 1 minute before starting a new pair.");
+                await sleep(60000);
+            }
+        } else {
+            console.error("[ERROR] Wrap transaction failed. Waiting 1 minute before starting a new pair.");
+            await sleep(60000);
+        }
     }
 }
 
